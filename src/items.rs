@@ -297,7 +297,7 @@ pub(crate) struct FnSig<'a> {
     decl: &'a ast::FnDecl,
     generics: &'a ast::Generics,
     ext: ast::Extern,
-    coroutine_kind: Cow<'a, Option<ast::CoroutineKind>>,
+    coroutine_marker: &'a Option<ast::CoroutineMarker>,
     constness: ast::Const,
     defaultness: ast::Defaultness,
     safety: ast::Safety,
@@ -313,7 +313,7 @@ impl<'a> FnSig<'a> {
     ) -> FnSig<'a> {
         FnSig {
             safety: method_sig.header.safety,
-            coroutine_kind: Cow::Borrowed(&method_sig.header.coroutine_kind),
+            coroutine_marker: &method_sig.header.coroutine_marker,
             constness: method_sig.header.constness,
             defaultness,
             ext: method_sig.header.ext,
@@ -337,7 +337,7 @@ impl<'a> FnSig<'a> {
                 generics,
                 ext: sig.header.ext,
                 constness: sig.header.constness,
-                coroutine_kind: Cow::Borrowed(&sig.header.coroutine_kind),
+                coroutine_marker: &sig.header.coroutine_marker,
                 defaultness,
                 safety: sig.header.safety,
                 visibility: vis,
@@ -352,8 +352,8 @@ impl<'a> FnSig<'a> {
         result.push_str(&*format_visibility(context, self.visibility));
         result.push_str(format_defaultness(self.defaultness));
         result.push_str(format_constness(self.constness));
-        self.coroutine_kind
-            .map(|coroutine_kind| result.push_str(format_coro(&coroutine_kind)));
+        self.coroutine_marker
+            .map(|coroutine_marker| result.push_str(format_coro(coroutine_marker)));
         result.push_str(format_safety(self.safety));
         result.push_str(&format_extern(
             self.ext,
@@ -1525,7 +1525,7 @@ fn get_bytepos_after_visibility(vis: &ast::Visibility, default_span: Span) -> By
 
 // Format tuple or struct without any fields. We need to make sure that the comments
 // inside the delimiters are preserved.
-fn format_empty_struct_or_tuple(
+pub(crate) fn format_empty_struct_or_tuple(
     context: &RewriteContext<'_>,
     span: Span,
     offset: Indent,
@@ -1885,8 +1885,8 @@ pub(crate) fn rewrite_struct_field_prefix(
     field: &ast::FieldDef,
 ) -> RewriteResult {
     let vis = format_visibility(context, &field.vis);
-    let mut_restriction = format_mut_restriction(context, &field.mut_restriction);
-    let safety = format_safety(field.safety);
+    let mut_restriction = format_mut_restriction(context, field.mut_restriction());
+    let safety = format_safety(field.safety());
     let type_annotation_spacing = type_annotation_spacing(context.config);
     Ok(match field.ident {
         Some(name) => format!(
@@ -1915,7 +1915,7 @@ pub(crate) fn rewrite_struct_field(
     lhs_max_width: usize,
 ) -> RewriteResult {
     // FIXME(default_field_values): Implement formatting.
-    if field.default.is_some() {
+    if field.default_value().is_some() {
         return Err(RewriteError::Unknown);
     }
 
@@ -2008,7 +2008,7 @@ impl<'a> StaticParts<'a> {
                 ),
                 ast::ItemKind::Const(c) => (
                     Some(c.defaultness),
-                    if c.rhs_kind.is_type_const() {
+                    if c.kind == ast::ConstItemKind::TypeConst {
                         "type const"
                     } else {
                         "const"
@@ -2017,7 +2017,7 @@ impl<'a> StaticParts<'a> {
                     c.ident,
                     &c.ty,
                     ast::Mutability::Not,
-                    c.rhs_kind.expr(),
+                    c.body.as_deref(),
                     Some(&c.generics),
                 ),
                 _ => unreachable!(),
@@ -2039,7 +2039,7 @@ impl<'a> StaticParts<'a> {
     pub(crate) fn from_trait_item(ti: &'a ast::AssocItem, ident: Ident) -> Self {
         let (defaultness, ty, expr_opt, generics, prefix) = match &ti.kind {
             ast::AssocItemKind::Const(c) => {
-                let prefix = if c.rhs_kind.is_type_const() {
+                let prefix = if c.kind == ast::ConstItemKind::TypeConst {
                     "type const"
                 } else {
                     "const"
@@ -2047,7 +2047,7 @@ impl<'a> StaticParts<'a> {
                 (
                     c.defaultness,
                     &c.ty,
-                    c.rhs_kind.expr(),
+                    c.body.as_deref(),
                     Some(&c.generics),
                     prefix,
                 )
@@ -2071,7 +2071,7 @@ impl<'a> StaticParts<'a> {
     pub(crate) fn from_impl_item(ii: &'a ast::AssocItem, ident: Ident) -> Self {
         let (defaultness, ty, expr_opt, generics, prefix) = match &ii.kind {
             ast::AssocItemKind::Const(c) => {
-                let prefix = if c.rhs_kind.is_type_const() {
+                let prefix = if c.kind == ast::ConstItemKind::TypeConst {
                     "type const"
                 } else {
                     "const"
@@ -2079,7 +2079,7 @@ impl<'a> StaticParts<'a> {
                 (
                     c.defaultness,
                     &c.ty,
-                    c.rhs_kind.expr(),
+                    c.body.as_deref(),
                     Some(&c.generics),
                     prefix,
                 )
@@ -2361,7 +2361,14 @@ impl Rewrite for ast::Param {
 
             Ok(result)
         } else {
-            self.ty.rewrite_result(context, shape)
+            combine_strs_with_missing_comments(
+                context,
+                &param_attrs_result,
+                &self.ty.rewrite_result(context, shape)?,
+                span,
+                shape,
+                !has_multiple_attr_lines && !has_doc_comments,
+            )
         }
     }
 }
